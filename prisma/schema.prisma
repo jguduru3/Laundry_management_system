@@ -1,0 +1,181 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String   @unique
+  email     String?
+  address   String?
+  area      String?  // Hyderabad locality, see src/lib/hyderabad.ts
+  notes     String?
+  pinHash   String?  // customer portal PIN (scrypt); null until the customer activates portal access
+  orders    Order[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Service {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  category    String      // wash, dry_clean, ironing, specialty
+  price       Float
+  unit        String      // kg, piece
+  description String?
+  isActive    Boolean     @default(true)
+  orderItems  OrderItem[]
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+model Order {
+  id            String      @id @default(cuid())
+  orderNumber   String      @unique
+  customerId    String
+  customer      Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  status        String      // PENDING, PICKED_UP, WASHING, DRYING, IRONING, READY, OUT_FOR_DELIVERY, DELIVERED, CANCELLED
+  paymentStatus String      // UNPAID, PARTIAL, PAID
+  paymentMethod String      // CASH, CARD, MOBILE (UPI)
+  source        String      @default("STAFF") // STAFF (created at counter) or PORTAL (booked by customer)
+  deliveryType  String      @default("STANDARD") // STANDARD or EXPRESS
+  expressCharge Float       @default(0)
+  deliveryFee   Float       @default(0)
+  platformFee   Float       @default(0) // flat per-order platform fee, included in totalAmount
+  discount      Float       @default(0)
+  couponCode    String?
+  totalAmount   Float       // items + expressCharge + deliveryFee + platformFee - discount
+  pickupSlot    String?     // e.g. "10:00-13:00"
+  area          String?
+  address       String?
+  pickupAgentId    String?
+  pickupAgent      Agent?    @relation("PickupAgent", fields: [pickupAgentId], references: [id], onDelete: SetNull)
+  deliveryAgentId  String?
+  deliveryAgent    Agent?    @relation("DeliveryAgent", fields: [deliveryAgentId], references: [id], onDelete: SetNull)
+  deliveryCode     String?   // 4 digits the customer gives the agent at handover
+  pickedUpAt       DateTime?
+  outForDeliveryAt DateTime?
+  deliveredAt      DateTime?
+  collectedAmount  Float?    // cash/UPI collected by the agent at the door
+  collectedVia     String?   // CASH or MOBILE
+  agentNotes       String?
+  rating        Int?        // 1-5, given by the customer after delivery
+  feedback      String?
+  ratedAt       DateTime?
+  notes         String?
+  pickupDate    DateTime?
+  deliveryDate  DateTime?
+  items         OrderItem[]
+  payments      Payment[]
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model OrderItem {
+  id         String   @id @default(cuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  serviceId  String
+  service    Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  quantity   Float
+  unitPrice  Float
+  totalPrice Float
+  notes      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Coupon {
+  id             String    @id @default(cuid())
+  code           String    @unique
+  description    String?
+  type           String    // PERCENT or FLAT
+  value          Float
+  maxDiscount    Float?    // cap for PERCENT coupons
+  minOrder       Float     @default(0)
+  firstOrderOnly Boolean   @default(false)
+  isActive       Boolean   @default(true)
+  expiresAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+// Single row (id = "default") holding business details and order charges.
+model Setting {
+  id                String   @id @default("default")
+  businessName      String   @default("AquaClean Laundry")
+  phone             String   @default("+91 90000 00000")
+  whatsapp          String?
+  email             String?
+  address           String   @default("Madhapur, Hyderabad, Telangana 500081")
+  gstin             String?
+  gstRate           Float    @default(18)   // prices are GST-inclusive; used for the invoice breakup
+  upiId             String?
+  platformFee       Float    @default(5)
+  expressRate       Float    @default(30)   // percent added to item subtotal for EXPRESS
+  deliveryFee       Float    @default(49)
+  freeDeliveryAbove Float    @default(499)
+  minOrderValue     Float    @default(199)
+  standardHours     Int      @default(48)
+  expressHours      Int      @default(24)
+  updatedAt         DateTime @updatedAt
+}
+
+// One live SMS OTP challenge per normalised 10-digit mobile; replaced on every resend.
+model OtpChallenge {
+  id          String   @id @default(cuid())
+  phone       String   @unique
+  codeHash    String   // HMAC-SHA256 of phone + code, never the code itself
+  expiresAt   DateTime
+  attempts    Int      @default(0) // wrong guesses against the current code
+  lastSentAt  DateTime
+  windowStart DateTime // start of the rolling hour used for the send limit
+  sendCount   Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Online payment attempts through a gateway (Razorpay test mode). Amounts in paise.
+model Payment {
+  id                String   @id @default(cuid())
+  orderId           String
+  order             Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider          String   @default("RAZORPAY")
+  providerOrderId   String   @unique
+  providerPaymentId String?
+  amount            Int
+  currency          String   @default("INR")
+  status            String   @default("CREATED") // CREATED, PAID, FAILED
+  method            String?  // upi, card, netbanking, wallet (as reported by the gateway)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([orderId])
+}
+
+
+// Pickup and delivery staff who use the /agent portal.
+model Agent {
+  id             String   @id @default(cuid())
+  name           String
+  phone          String   @unique
+  pinHash        String
+  zone           String?  // e.g. "West" (see SERVICE_AREAS zones)
+  vehicle        String?  // e.g. "TS09 AB 1234, bike"
+  isActive       Boolean  @default(true)
+  pickupOrders   Order[]  @relation("PickupAgent")
+  deliveryOrders Order[]  @relation("DeliveryAgent")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
